@@ -1,0 +1,112 @@
+name: Build Linux Desktop (AgentRouter Fix)
+
+on:
+  push:
+    branches:
+      - fix/agentrouter-opaque-blob-recovery
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-desktop-agentrouter-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-linux-desktop:
+    name: Build Linux x86_64 Desktop packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            dbus-x11 \
+            xvfb \
+            xauth \
+            wmctrl \
+            xdotool \
+            openbox
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Install project dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd desktop
+          bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test AgentRouter opaque-blob recovery
+        run: bun run test ./tests/responses/responses-cold-opaque-recovery.test.ts
+
+      - name: Build dashboard
+        run: bun run build:gui
+
+      - name: Prepare Linux sidecar
+        run: bun desktop/scripts/prepare-sidecar.ts --target x86_64-unknown-linux-gnu
+
+      - name: Prepare AppImage bundler
+        run: chmod +x desktop/scripts/appimage-patchelf.py
+
+      # Build each format in a separate Cargo target. AppImage tooling can mutate its
+      # input tree, so it must not share a target directory with the DEB build.
+      - name: Build AppImage
+        working-directory: desktop
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/opencodex-appimage-target
+          PATCHELF: ${{ github.workspace }}/desktop/scripts/appimage-patchelf.py
+        run: bunx tauri build --ci --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Build DEB
+        working-directory: desktop
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/opencodex-deb-target
+        run: bunx tauri build --ci --bundles deb --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Stage packages and checksums
+        env:
+          APPIMAGE_BUNDLE: ${{ runner.temp }}/opencodex-appimage-target/release/bundle/appimage
+          DEB_BUNDLE: ${{ runner.temp }}/opencodex-deb-target/release/bundle/deb
+          BUNDLE_ROOT: ${{ runner.temp }}/opencodex-linux-bundles
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUNDLE_ROOT/appimage" "$BUNDLE_ROOT/deb"
+          cp -a "$APPIMAGE_BUNDLE/." "$BUNDLE_ROOT/appimage/"
+          cp -a "$DEB_BUNDLE/." "$BUNDLE_ROOT/deb/"
+          (
+            cd "$BUNDLE_ROOT"
+            find appimage deb -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          )
+          find "$BUNDLE_ROOT" -maxdepth 2 -type f -printf '%P (%s bytes)\n'
+
+      - name: Verify packaged Linux sidecar and keyring
+        run: bash desktop/scripts/verify-linux-sidecar.sh "${{ runner.temp }}/opencodex-linux-bundles/appimage"
+
+      - name: Upload Linux Desktop packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opencodex-linux-desktop-x86_64
+          path: ${{ runner.temp }}/opencodex-linux-bundles/
+          if-no-files-found: error
+          retention-days: 14

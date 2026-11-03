@@ -52,15 +52,18 @@ async function send() {
   return text;
 }
 
-for (const shape of ["sse", "flat-code", "flat-wording", "502"] as const) test(`cold reasoning rejection ${shape} rebuilds once and preserves tool pairs (#7369)`, async () => {
+for (const shape of ["sse", "flat-code", "flat-wording", "flat-agentrouter", "502"] as const) test(`cold reasoning rejection ${shape} rebuilds once and preserves tool pairs (#7369)`, async () => {
   const sent: Record<string, unknown>[] = [];
   globalThis.fetch = (async (_url, init) => {
     sent.push(JSON.parse(String(init?.body)));
     if (sent.length <= (shape === "502" ? 3 : 1)) {
       if (shape === "502") return Response.json({ error }, { status: 502 });
       if (shape === "sse") return rejected();
+      const verificationMessage = "The encrypted content fixture could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
       const flat = shape === "flat-code" ? { code: error.code, message: error.message } : {
-        message: "The encrypted content fixture could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+        message: shape === "flat-agentrouter"
+          ? `${verificationMessage} [hub-1] [trace_id=fixture-trace]`
+          : verificationMessage,
       };
       return new Response(frame("error", flat), { headers: { "content-type": "text/event-stream" } });
     }
@@ -75,6 +78,25 @@ for (const shape of ["sse", "flat-code", "flat-wording", "502"] as const) test(`
   const items = sent.at(-1)!.input as Array<Record<string, unknown>>;
   expect(items.filter(x => x.call_id === "fixture-call").map(x => x.type)).toEqual(["function_call", "function_call_output"]);
   expect(items.find(x => x.type === "function_call_output")?.output).toBe("fixture-result");
+});
+
+test("AgentRouter trace metadata is accepted without allowing arbitrary error suffixes", () => {
+  const message = "The encrypted content fixture could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+  const nested = (value: string) => JSON.stringify({
+    error: { type: "invalid_request_error", code: null, message: value },
+  });
+
+  expect(isSelfIdentifiedOpaqueBlobRejection(
+    nested(`${message} [hub-1] [trace_id=fixture-trace]`),
+  )).toBe(true);
+
+  for (const suffix of [
+    " [hub-x] [trace_id=fixture-trace]",
+    " [hub-1] [trace_id=]",
+    " [hub-1] [trace_id=fixture-trace] trailing text",
+  ]) {
+    expect(isSelfIdentifiedOpaqueBlobRejection(nested(message + suffix))).toBe(false);
+  }
 });
 
 test("cold valid native replay is preserved without another send", async () => {
