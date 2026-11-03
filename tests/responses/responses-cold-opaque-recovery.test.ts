@@ -52,7 +52,17 @@ async function send() {
   return text;
 }
 
-for (const shape of ["sse", "flat-code", "flat-wording", "flat-agentrouter", "502"] as const) test(`cold reasoning rejection ${shape} rebuilds once and preserves tool pairs (#7369)`, async () => {
+for (const shape of [
+  "sse",
+  "flat-code",
+  "flat-wording",
+  "flat-agentrouter",
+  "flat-agentrouter-reason-only",
+  "flat-agentrouter-prefixed",
+  "http-agentrouter-reason-only",
+  "http-agentrouter-prefixed",
+  "502",
+] as const) test(`cold reasoning rejection ${shape} rebuilds once and preserves tool pairs (#7369)`, async () => {
   const sent: Record<string, unknown>[] = [];
   globalThis.fetch = (async (_url, init) => {
     sent.push(JSON.parse(String(init?.body)));
@@ -60,10 +70,24 @@ for (const shape of ["sse", "flat-code", "flat-wording", "flat-agentrouter", "50
       if (shape === "502") return Response.json({ error }, { status: 502 });
       if (shape === "sse") return rejected();
       const verificationMessage = "The encrypted content fixture could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+      const reasonOnlyAgentRouterMessage = "Encrypted content could not be decrypted or parsed. [trace_id=fixture-trace]";
+      const prefixedAgentRouterMessage = "OpenAI Responses bad request: The encrypted content gAAA.fixture-ciphertext.wSA6 could not be verified. Reason: Encrypted content could not be decrypted or parsed. [trace_id=fixture-trace]";
+      if (shape === "http-agentrouter-reason-only" || shape === "http-agentrouter-prefixed") {
+        const message = shape === "http-agentrouter-reason-only"
+          ? reasonOnlyAgentRouterMessage
+          : prefixedAgentRouterMessage;
+        return Response.json({
+          error: { type: "invalid_request_error", code: null, message },
+        }, { status: 400 });
+      }
       const flat = shape === "flat-code" ? { code: error.code, message: error.message } : {
         message: shape === "flat-agentrouter"
           ? `${verificationMessage} [hub-1] [trace_id=fixture-trace]`
-          : verificationMessage,
+          : shape === "flat-agentrouter-reason-only"
+            ? reasonOnlyAgentRouterMessage
+            : shape === "flat-agentrouter-prefixed"
+              ? prefixedAgentRouterMessage
+              : verificationMessage,
       };
       return new Response(frame("error", flat), { headers: { "content-type": "text/event-stream" } });
     }
@@ -90,10 +114,25 @@ test("AgentRouter trace metadata is accepted without allowing arbitrary error su
     nested(`${message} [hub-1] [trace_id=fixture-trace]`),
   )).toBe(true);
 
+  const reasonOnly = "Encrypted content could not be decrypted or parsed.";
+  const prefixed = "OpenAI Responses bad request: The encrypted content gAAA.fixture-ciphertext.wSA6 could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+  expect(isSelfIdentifiedOpaqueBlobRejection(
+    nested(`${reasonOnly} [trace_id=fixture-trace]`),
+  )).toBe(true);
+  expect(isSelfIdentifiedOpaqueBlobRejection(
+    nested(`${prefixed} [trace_id=fixture-trace]`),
+  )).toBe(true);
+
+  // The two additional AgentRouter forms require its exact trace-id suffix.
+  expect(isSelfIdentifiedOpaqueBlobRejection(nested(reasonOnly))).toBe(false);
+  expect(isSelfIdentifiedOpaqueBlobRejection(nested(prefixed))).toBe(false);
+
   for (const suffix of [
     " [hub-x] [trace_id=fixture-trace]",
     " [hub-1] [trace_id=]",
     " [hub-1] [trace_id=fixture-trace] trailing text",
+    " [trace_id=]",
+    " [trace_id=fixture-trace] trailing text",
   ]) {
     expect(isSelfIdentifiedOpaqueBlobRejection(nested(message + suffix))).toBe(false);
   }
