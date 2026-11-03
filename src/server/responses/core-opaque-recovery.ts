@@ -135,8 +135,8 @@ export function isReasoningBlobCallerMismatchMessage(message: string): boolean {
 
 
 /**
- * AgentRouter appends routing metadata to otherwise canonical upstream error messages.
- * Strip only its exact trailing hub/trace suffix; arbitrary trailing prose must not authorize
+ * AgentRouter appends a trace id, sometimes preceded by a hub id, to its encrypted-content
+ * rejection. Accept only the exact trailing metadata; arbitrary trailing prose must not authorize
  * an opaque-state resend.
  */
 const AGENT_ROUTER_TRACE_SUFFIX = /[ \t]+(?:\[hub-\d+\] )?\[trace_id=[^\]\s]+\]$/;
