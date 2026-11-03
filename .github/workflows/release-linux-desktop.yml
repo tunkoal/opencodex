@@ -10,7 +10,7 @@ on:
         description: "Desktop version to publish (must match all four version sources)"
         required: true
         type: string
-        default: "2.96.1"
+        default: "2.96.2"
       notes:
         description: "Release notes"
         required: false
@@ -237,7 +237,7 @@ jobs:
             cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           OpenCodex v${RELEASE_VERSION} — Linux Desktop
 
-          - Includes AgentRouter encrypted reasoning-state recovery.
+          - Covers AgentRouter trace-only encrypted-content verification errors.
           - Publishes signed AppImage and DEB packages.
           - Configures the in-app updater to use tunkoal/opencodex.
           EOF
