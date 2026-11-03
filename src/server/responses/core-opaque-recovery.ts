@@ -135,6 +135,22 @@ export function isReasoningBlobCallerMismatchMessage(message: string): boolean {
 
 
 /**
+ * AgentRouter appends routing metadata to otherwise canonical upstream error messages.
+ * Strip only its exact trailing hub/trace suffix; arbitrary trailing prose must not authorize
+ * an opaque-state resend.
+ */
+const AGENT_ROUTER_TRACE_SUFFIX = /[ \\t]+\\[hub-\\d+\\] \\[trace_id=[^\\]\\s]+\\]$/;
+const ENCRYPTED_CONTENT_VERIFICATION_REASON =
+  " could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+
+function isUnverifiableEncryptedContentMessage(message: string): boolean {
+  const upstreamMessage = message.replace(AGENT_ROUTER_TRACE_SUFFIX, "");
+  return upstreamMessage.startsWith("The encrypted content ")
+    && upstreamMessage.endsWith(ENCRYPTED_CONTENT_VERIFICATION_REASON);
+}
+
+
+/**
  * Longest embedded payload this will parse. The wrapper is a short error envelope; anything
  * larger is not the shape being matched, and refusing to walk it keeps an upstream-controlled
  * string from deciding how much work the classifier does.
@@ -245,10 +261,7 @@ export function isSelfIdentifiedOpaqueBlobRejection(bodyText: string): boolean {
         if (
           (error.code === null || error.code === undefined)
           && typeof error.message === "string"
-          && error.message.startsWith("The encrypted content ")
-          && error.message.endsWith(
-            " could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
-          )
+          && isUnverifiableEncryptedContentMessage(error.message)
         ) return true;
         // #4469: the caller-mismatch wording arrives without a dedicated code, so the
         // message itself is the identity. It is not gated on code being null — the upstream
@@ -264,8 +277,7 @@ export function isSelfIdentifiedOpaqueBlobRejection(bodyText: string): boolean {
     if ((record.error === undefined || record.error === null)
       && (record.type === "error" || record.type === "invalid_request_error")
       && (record.code === "invalid_encrypted_content" || ((record.code === null || record.code === undefined)
-        && typeof record.message === "string" && record.message.startsWith("The encrypted content ")
-        && record.message.endsWith(" could not be verified. Reason: Encrypted content could not be decrypted or parsed.")))) return true;
+        && typeof record.message === "string" && isUnverifiableEncryptedContentMessage(record.message)))) return true;
 
     // The caller-mismatch identity also arrives as a flat typed error.
     if (
