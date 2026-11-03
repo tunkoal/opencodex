@@ -1,0 +1,268 @@
+name: Publish Linux Desktop Update
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Desktop version to publish (must match all four version sources)"
+        required: true
+        type: string
+        default: "2.96.1"
+      notes:
+        description: "Release notes"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencodex-linux-desktop-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: Build, sign and publish Linux Desktop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            version="${REF_NAME#v}"
+            if [ "$REF_NAME" = "$version" ]; then
+              echo "::error::Tag must use the v<version> form"
+              exit 1
+            fi
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release version: $version"
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Verify release version sources
+        run: bun scripts/release-version-sources.ts check "$RELEASE_VERSION"
+
+      - name: Require the fork updater endpoint and signing secrets
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || {
+            echo "::error::Repository secret TAURI_SIGNING_PRIVATE_KEY is not configured"
+            exit 1
+          }
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" || {
+            echo "::error::Repository secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not configured"
+            exit 1
+          }
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const config = JSON.parse(readFileSync("desktop/src-tauri/tauri.conf.json", "utf8"));
+          const updater = config.plugins?.updater;
+          const expected = "https://github.com/tunkoal/opencodex/releases/latest/download/latest.json";
+          if (!updater?.pubkey || typeof updater.pubkey !== "string") {
+            throw new Error("Tauri updater public key is missing");
+          }
+          if (!updater.endpoints?.includes(expected)) {
+            throw new Error("Tauri updater endpoint is not configured for tunkoal/opencodex");
+          }
+          NODE
+
+      - name: Refuse an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists; refusing to overwrite it"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_sha="$(git rev-parse "${tag}^{commit}")"
+            test "$tag_sha" = "$GITHUB_SHA" || {
+              echo "::error::Tag $tag does not point at this workflow commit"
+              exit 1
+            }
+          fi
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+
+      - name: Install project dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd desktop
+          bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test AgentRouter opaque-blob recovery
+        run: bun run test ./tests/responses/responses-cold-opaque-recovery.test.ts
+
+      - name: Build dashboard
+        run: bun run build:gui
+
+      - name: Prepare Linux sidecar
+        run: bun desktop/scripts/prepare-sidecar.ts --target x86_64-unknown-linux-gnu
+
+      - name: Prepare AppImage bundler
+        run: |
+          chmod +x desktop/scripts/appimage-patchelf.py
+          echo "PATCHELF=$GITHUB_WORKSPACE/desktop/scripts/appimage-patchelf.py" >> "$GITHUB_ENV"
+
+      - name: Build signed AppImage
+        working-directory: desktop
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/opencodex-release-appimage
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bunx tauri build --ci --target x86_64-unknown-linux-gnu --bundles appimage
+
+      - name: Build signed DEB
+        working-directory: desktop
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/opencodex-release-deb
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bunx tauri build --ci --target x86_64-unknown-linux-gnu --bundles deb
+
+      - name: Stage isolated Linux bundles
+        env:
+          APPIMAGE_TARGET: ${{ runner.temp }}/opencodex-release-appimage
+          DEB_TARGET: ${{ runner.temp }}/opencodex-release-deb
+        run: |
+          set -euo pipefail
+          bundle_root="$RUNNER_TEMP/opencodex-linux-release-bundles"
+          mkdir -p "$bundle_root/appimage" "$bundle_root/deb"
+          cp -a "$APPIMAGE_TARGET/x86_64-unknown-linux-gnu/release/bundle/appimage/." "$bundle_root/appimage/"
+          cp -a "$DEB_TARGET/x86_64-unknown-linux-gnu/release/bundle/deb/." "$bundle_root/deb/"
+          echo "DESKTOP_BUNDLE_ROOT=$bundle_root" >> "$GITHUB_ENV"
+
+      - name: Verify packaged Linux sidecar and keyring
+        run: bash desktop/scripts/verify-linux-sidecar.sh "$DESKTOP_BUNDLE_ROOT/appimage"
+
+      - name: Collect release assets
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          bun desktop/scripts/collect-release-assets.ts \
+            --version "$RELEASE_VERSION" \
+            --target x86_64-unknown-linux-gnu \
+            --out dist/release \
+            --bundle-root "$DESKTOP_BUNDLE_ROOT"
+
+      - name: Generate updater manifest
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          bun desktop/scripts/updater-manifest.ts \
+            --version "$RELEASE_VERSION" \
+            --dir dist/release \
+            --repo "$GITHUB_REPOSITORY" \
+            --out dist/release/latest.json
+
+      - name: Verify signatures, checksums and updater targets
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          bun -e '
+            import { loadUpdaterPublicKey, verifyUpdaterSignature, verifyChecksums } from "./desktop/scripts/verify-release-assets.ts";
+            const version = process.env.RELEASE_VERSION;
+            const dir = "dist/release";
+            const key = loadUpdaterPublicKey("desktop/src-tauri/tauri.conf.json");
+            const files = [
+              `OpenCodex-${version}-linux-x86_64.AppImage`,
+              `OpenCodex-${version}-linux-amd64.deb`,
+            ];
+            for (const file of files) verifyUpdaterSignature(`${dir}/${file}`, key);
+            const checksums = verifyChecksums(dir);
+            const manifest = JSON.parse(await Bun.file(`${dir}/latest.json`).text());
+            for (const target of ["linux-x86_64", "linux-x86_64-deb"]) {
+              if (!manifest.platforms?.[target]) throw new Error(`Missing updater target: ${target}`);
+            }
+            console.log(JSON.stringify({ version, checksums, platforms: Object.keys(manifest.platforms) }, null, 2));
+          '
+
+      - name: Prepare release notes
+        env:
+          INPUT_NOTES: ${{ inputs.notes }}
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          if [ -n "$INPUT_NOTES" ]; then
+            printf '%s\n' "$INPUT_NOTES" > "$RUNNER_TEMP/release-notes.md"
+          else
+            cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          OpenCodex v${RELEASE_VERSION} — Linux Desktop
+
+          - Includes AgentRouter encrypted reasoning-state recovery.
+          - Publishes signed AppImage and DEB packages.
+          - Configures the in-app updater to use tunkoal/opencodex.
+          EOF
+          fi
+
+      - name: Create and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "OpenCodex v${RELEASE_VERSION} (Linux)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            dist/release/*
+
+      - name: Write workflow summary
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          {
+            echo "## Published OpenCodex Linux Desktop v${RELEASE_VERSION}"
+            echo
+            echo "- Repository: `$GITHUB_REPOSITORY`"
+            echo "- Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/v${RELEASE_VERSION}"
+            echo "- Updater manifest: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+            echo "- Assets: signed AppImage, signed DEB, signatures, checksums, latest.json"
+          } >> "$GITHUB_STEP_SUMMARY"
