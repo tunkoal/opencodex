@@ -65,6 +65,8 @@ jobs:
 
       - name: Setup project Bun
         uses: ./.github/actions/setup-project-bun
+        with:
+          role: test-runner
 
       - name: Verify release version sources
         run: bun scripts/release-version-sources.ts check "$RELEASE_VERSION"
