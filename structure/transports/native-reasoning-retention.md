@@ -50,8 +50,11 @@ The flat SSE error projector preserves a caller-validated 400 rejection identity
 dedicated code or exact verification wording. A successful native replay remains untouched.
 Only the existing explicit rejection identities can
 trigger the existing one-shot sanitized rebuild; generic 502s do not. An identified reasoning-only
-502 follows that contract too. The encrypted-function-output-specific message still requires actual
-outbound encrypted function output. Existing transport retries retain their separate send accounting.
+502 follows that contract too. AgentRouter's trace-only Responses errors are recognized in both its
+bare decryption-reason form and its `OpenAI Responses bad request` wrapper; these additional forms
+require an exact trailing `[trace_id=...]` suffix (with an optional `[hub-N]` prefix) and a
+code-less `invalid_request_error`. The encrypted-function-output-specific message still requires
+actual outbound encrypted function output. Existing transport retries retain their separate send accounting.
 Text/tool commitment, ambiguous-resend ownership, non-replayable responses, configured send limits
 and the one-shot guard still prohibit unsafe replay. The outbound rebuild preserves store:false and
 paired tool calls/results; this path never edits the on-disk conversation. It does not decrypt native
