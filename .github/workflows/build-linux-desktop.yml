@@ -27,6 +27,8 @@ jobs:
 
       - name: Setup project Bun
         uses: ./.github/actions/setup-project-bun
+        with:
+          role: test-runner
 
       - name: Install Tauri Linux dependencies
         run: |
