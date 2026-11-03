@@ -1,9 +1,9 @@
-name: Build Linux Desktop (AgentRouter Fix)
+name: Build Linux Desktop
 
 on:
   push:
     branches:
-      - fix/agentrouter-opaque-blob-recovery
+      - main
   workflow_dispatch:
 
 permissions:
