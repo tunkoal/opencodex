@@ -139,12 +139,26 @@ export function isReasoningBlobCallerMismatchMessage(message: string): boolean {
  * Strip only its exact trailing hub/trace suffix; arbitrary trailing prose must not authorize
  * an opaque-state resend.
  */
-const AGENT_ROUTER_TRACE_SUFFIX = /[ \t]+\[hub-\d+\] \[trace_id=[^\]\s]+\]$/;
+const AGENT_ROUTER_TRACE_SUFFIX = /[ \t]+(?:\[hub-\d+\] )?\[trace_id=[^\]\s]+\]$/;
+const OPENAI_RESPONSES_BAD_REQUEST_PREFIX = "OpenAI Responses bad request: ";
 const ENCRYPTED_CONTENT_VERIFICATION_REASON =
   " could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+const ENCRYPTED_CONTENT_DECRYPTION_FAILURE =
+  "Encrypted content could not be decrypted or parsed.";
 
 function isUnverifiableEncryptedContentMessage(message: string): boolean {
-  const upstreamMessage = message.replace(AGENT_ROUTER_TRACE_SUFFIX, "");
+  const hasAgentRouterTrace = AGENT_ROUTER_TRACE_SUFFIX.test(message);
+  const withoutTrace = message.replace(AGENT_ROUTER_TRACE_SUFFIX, "");
+  const hasResponsesBadRequestPrefix = withoutTrace.startsWith(OPENAI_RESPONSES_BAD_REQUEST_PREFIX);
+  const upstreamMessage = hasResponsesBadRequestPrefix
+    ? withoutTrace.slice(OPENAI_RESPONSES_BAD_REQUEST_PREFIX.length)
+    : withoutTrace;
+
+  // AgentRouter also emits the bare decryption reason, and its Responses client may prepend
+  // this wrapper. Both variants are accepted only with the exact trailing trace-id metadata.
+  if (upstreamMessage === ENCRYPTED_CONTENT_DECRYPTION_FAILURE) return hasAgentRouterTrace;
+  if (hasResponsesBadRequestPrefix && !hasAgentRouterTrace) return false;
+
   return upstreamMessage.startsWith("The encrypted content ")
     && upstreamMessage.endsWith(ENCRYPTED_CONTENT_VERIFICATION_REASON);
 }
