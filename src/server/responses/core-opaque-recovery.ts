@@ -139,7 +139,7 @@ export function isReasoningBlobCallerMismatchMessage(message: string): boolean {
  * Strip only its exact trailing hub/trace suffix; arbitrary trailing prose must not authorize
  * an opaque-state resend.
  */
-const AGENT_ROUTER_TRACE_SUFFIX = /[ \\t]+\\[hub-\\d+\\] \\[trace_id=[^\\]\\s]+\\]$/;
+const AGENT_ROUTER_TRACE_SUFFIX = /[ \t]+\[hub-\d+\] \[trace_id=[^\]\s]+\]$/;
 const ENCRYPTED_CONTENT_VERIFICATION_REASON =
   " could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
 
